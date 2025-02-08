@@ -409,8 +409,12 @@ var listCommand = ListCommand{
 			OptionReadTimeout,
 			OptionConnectTimeout,
 			OptionSTSRegion,
-			OptionSkipVerfiyCert,
+			OptionSkipVerifyCert,
 			OptionUserAgent,
+			OptionSignVersion,
+			OptionRegion,
+			OptionCloudBoxID,
+			OptionForcePathStyle,
 		},
 	},
 }

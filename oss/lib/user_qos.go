@@ -93,8 +93,12 @@ var userQosCommand = UserQosCommand{
 			OptionReadTimeout,
 			OptionConnectTimeout,
 			OptionSTSRegion,
-			OptionSkipVerfiyCert,
+			OptionSkipVerifyCert,
 			OptionUserAgent,
+			OptionSignVersion,
+			OptionRegion,
+			OptionCloudBoxID,
+			OptionForcePathStyle,
 		},
 	},
 }

@@ -149,8 +149,12 @@ var revertCommand = RevertCommand{
 			OptionReadTimeout,
 			OptionConnectTimeout,
 			OptionSTSRegion,
-			OptionSkipVerfiyCert,
+			OptionSkipVerifyCert,
 			OptionUserAgent,
+			OptionSignVersion,
+			OptionRegion,
+			OptionCloudBoxID,
+			OptionForcePathStyle,
 		},
 	},
 }

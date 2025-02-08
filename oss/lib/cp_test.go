@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -680,12 +681,13 @@ func (s *OssutilCommandSuite) TestBatchCPObject(c *C) {
 	c.Assert(err, IsNil)
 
 	// copy files
-	destBucket := bucketNamePrefix + randLowStr(10)
+	destBucket := bucketName + "-" + randLowStr(4)
 	showElapse, err = s.rawCP(CloudURLToString(bucketName, ""), CloudURLToString(destBucket, "123"), true, true, false, DefaultBigFileThreshold, CheckpointDir)
 	c.Assert(err, NotNil)
 	c.Assert(showElapse, Equals, false)
 
 	s.putBucket(destBucket, c)
+	time.Sleep(4 * time.Second)
 
 	showElapse, err = s.rawCP(CloudURLToString(bucketName, ""), CloudURLToString(destBucket, "123"), true, true, false, DefaultBigFileThreshold, CheckpointDir)
 	c.Assert(err, IsNil)
@@ -1042,6 +1044,7 @@ func (s *OssutilCommandSuite) TestPreparePartOption(c *C) {
 
 	p := 7
 	parallel := strconv.Itoa(p)
+	copyCommand.command.options = make(OptionMapType, len(OptionMap))
 	copyCommand.command.options[OptionParallel] = &parallel
 	partSize, routines = copyCommand.preparePartOption(1)
 	c.Assert(routines, Equals, p)
@@ -1641,6 +1644,85 @@ func (s *OssutilCommandSuite) TestCopyFunction(c *C) {
 	c.Assert(err, IsNil)
 	str = s.readFile(uploadFileName, c)
 	c.Assert(str, Equals, "a")
+}
+
+// test fileProducer
+func (s *OssutilCommandSuite) TestFileProducer(c *C) {
+	chFiles := make(chan fileInfoType, ChannelBuf)
+	chListError := make(chan error, 1)
+	storageURL, err := StorageURLFromString("&~", "")
+	c.Assert(err, IsNil)
+	copyCommand.fileProducer([]StorageURLer{storageURL}, chFiles, chListError)
+	err = <-chListError
+	c.Assert(err, NotNil)
+
+	select {
+	case _, ok := <-chFiles:
+		testLogger.Printf("chFiles channel has closed")
+		c.Assert(ok, Equals, false)
+	}
+
+	chFiles2 := make(chan fileInfoType, ChannelBuf)
+	chListError2 := make(chan error, 1)
+	storageURL, err = StorageURLFromString("cp_test.go", "")
+	c.Assert(err, IsNil)
+	copyCommand.fileProducer([]StorageURLer{storageURL}, chFiles2, chListError2)
+	err = <-chListError2
+	c.Assert(err, IsNil)
+
+	select {
+	case i, ok := <-chFiles2:
+		testLogger.Printf("%#v\n", i)
+		c.Assert(ok, Equals, true)
+		c.Assert(i, Equals, fileInfoType{filePath: "cp_test.go", dir: ""})
+	}
+
+	select {
+	case _, ok := <-chFiles:
+		testLogger.Printf("chFiles channel has closed")
+		c.Assert(ok, Equals, false)
+	}
+}
+
+// test objectProducer
+func (s *OssutilCommandSuite) TestCpObjectProducer(c *C) {
+	chObjects := make(chan objectInfoType, ChannelBuf)
+	chListError := make(chan error, 1)
+	cloudURL, err := CloudURLFromString(CloudURLToString(bucketNameNotExist, "demo.txt"), "")
+	c.Assert(err, IsNil)
+	client, err := oss.New(endpoint, accessKeyID, accessKeySecret)
+	c.Assert(err, IsNil)
+	bucket, err := client.Bucket(bucketNameNotExist)
+	c.Assert(err, IsNil)
+	copyCommand.objectProducer(bucket, cloudURL, chObjects, chListError)
+	err = <-chListError
+	c.Assert(err, NotNil)
+	select {
+	case _, ok := <-chObjects:
+		testLogger.Printf("chObjects channel has closed")
+		c.Assert(ok, Equals, false)
+	default:
+		testLogger.Printf("chObjects no data")
+		c.Assert(true, Equals, false)
+	}
+
+	chObjects2 := make(chan objectInfoType, ChannelBuf)
+	chListError2 := make(chan error, 1)
+	storageURL2, err := CloudURLFromString(CloudURLToString(bucketNameExist, ""), "")
+	c.Assert(err, IsNil)
+	bucket2, err := client.Bucket(bucketNameExist)
+	c.Assert(err, IsNil)
+	copyCommand.objectProducer(bucket2, storageURL2, chObjects2, chListError2)
+	err = <-chListError2
+	c.Assert(err, IsNil)
+	select {
+	case _, ok := <-chObjects:
+		testLogger.Printf("chObjects channel has closed")
+		c.Assert(ok, Equals, false)
+	default:
+		testLogger.Printf("chObjects no data")
+		c.Assert(true, Equals, false)
+	}
 }
 
 func (s *OssutilCommandSuite) TestCPURLEncoding(c *C) {
@@ -2840,7 +2922,7 @@ func (s *OssutilCommandSuite) TestBatchCPObjectWithInvalidIncludeExcludeEqual(c 
 
 	cmdline = []string{"ossutil", "cp", bucketStr, downdir, "-f", "--meta", "Cache-Control:no-cache"}
 	showElapse, err = s.rawCPWithFilter(args, false, true, false, DefaultBigFileThreshold, CheckpointDir, cmdline, "Cache-Control:no-cache", "")
-	c.Assert(err, IsNil)
+	c.Assert(err, NotNil)
 
 	cmdline = []string{"ossutil", "cp", bucketStr, downdir, "-f", "--acl", "public-read"}
 	showElapse, err = s.rawCPWithFilter(args, false, true, false, DefaultBigFileThreshold, CheckpointDir, cmdline, "", "public-read")
@@ -5063,6 +5145,74 @@ func (s *OssutilCommandSuite) TestBatchDownloadSymlinkObject(c *C) {
 	s.removeBucket(bucketName, true, c)
 }
 
+func (s *OssutilCommandSuite) TestBatchDownloadSymlinkObjectWithMultilevelAndEmptyObject(c *C) {
+	bucketName := bucketNamePrefix + randLowStr(10)
+	s.putBucket(bucketName, c)
+	object := randStr(12)
+	bucketStr := CloudURLToString(bucketName, object)
+
+	// put object
+	testFileName := "ossutil-test-" + randStr(10)
+	len := 1024 * 1024
+	content := randStr(len)
+	s.createFile(testFileName, content, c)
+
+	// upload files
+	args := []string{testFileName, bucketStr}
+	cmdline := []string{"ossutil", "cp", testFileName, bucketStr}
+	_, err := s.rawCPWithFilter(args, false, true, false, DefaultBigFileThreshold, CheckpointDir, cmdline, "", "")
+	c.Assert(err, IsNil)
+
+	// create symlink object
+	symObject := object + "-link"
+	strCmdline := fmt.Sprintf("%s %s", CloudURLToString(bucketName, symObject), CloudURLToString(bucketName, object))
+	err = s.initCreateSymlink(strCmdline)
+	c.Assert(err, IsNil)
+	err = createSymlinkCommand.RunCommand()
+	c.Assert(err, IsNil)
+
+	// create symlink to symlink
+	symObject2 := object + "-link2"
+	strCmdline = fmt.Sprintf("%s %s", CloudURLToString(bucketName, symObject2), CloudURLToString(bucketName, symObject))
+	err = s.initCreateSymlink(strCmdline)
+	c.Assert(err, IsNil)
+	err = createSymlinkCommand.RunCommand()
+	c.Assert(err, IsNil)
+
+	// batch download symlink object
+	args = []string{CloudURLToString(bucketName, symObject2), "." + string(os.PathSeparator)}
+	cmdline = []string{"ossutil", "cp", CloudURLToString(bucketName, symObject2), "." + string(os.PathSeparator)}
+	_, err = s.rawCPWithFilter(args, true, true, false, DefaultBigFileThreshold, CheckpointDir, cmdline, "", "")
+	c.Assert(err, IsNil)
+
+	_, err = os.Stat(symObject2)
+	c.Assert(err, NotNil)
+
+	//delete object
+	command := "rm"
+	args = []string{CloudURLToString(bucketName, object)}
+	testLogger.Print(configFile)
+	options := OptionMapType{
+		"endpoint":        &endpoint,
+		"accessKeyID":     &accessKeyID,
+		"accessKeySecret": &accessKeySecret,
+	}
+	_, err = cm.RunCommand(command, args, options)
+	c.Assert(err, IsNil)
+
+	// download symlink object with deleted object
+	args = []string{CloudURLToString(bucketName, symObject), "." + string(os.PathSeparator)}
+	cmdline = []string{"ossutil", "cp", CloudURLToString(bucketName, symObject), "." + string(os.PathSeparator)}
+	_, err = s.rawCPWithFilter(args, true, true, false, DefaultBigFileThreshold, CheckpointDir, cmdline, "", "")
+	c.Assert(err, IsNil)
+
+	_, err = os.Stat(symObject)
+	c.Assert(err, NotNil)
+
+	s.removeBucket(bucketName, true, c)
+	os.Remove(testFileName)
+}
+
 func (s *OssutilCommandSuite) TestCPObjectWithInputPassword(c *C) {
 	bucketName := bucketNamePrefix + randLowStr(10)
 	s.putBucket(bucketName, c)
@@ -5148,14 +5298,12 @@ func (s *OssutilCommandSuite) TestCPObjectUnderAKmode(c *C) {
 }
 
 func (s *OssutilCommandSuite) TestCPObjectUnderEcsmodeWithConfigEcsUrl(c *C) {
-	oldConfigStr, err := ioutil.ReadFile(configFile)
-	c.Assert(err, IsNil)
-	fd, _ := os.OpenFile(configFile, os.O_RDWR|os.O_TRUNC|os.O_CREATE, 0664)
 	ecsAk := "http://100.100.100.200/latest/meta-data/Ram/security-credentials/" + ecsRoleName
 	configStr := "[Credentials]" + "\n" + "language=EN" + "\n" + "endpoint=" + endpoint + "\n"
 	configStr = configStr + "[AkService]" + "\n" + "ecsAk=" + ecsAk
-	fd.WriteString(configStr)
-	fd.Close()
+
+	cfile := randStr(10)
+	s.createFile(cfile, configStr, c)
 
 	// create bucket
 	mode := "EcsRamRole"
@@ -5167,9 +5315,9 @@ func (s *OssutilCommandSuite) TestCPObjectUnderEcsmodeWithConfigEcsUrl(c *C) {
 	options := OptionMapType{
 		"endpoint":   &str,
 		"mode":       &mode,
-		"configFile": &configFile,
+		"configFile": &cfile,
 	}
-	_, err = cm.RunCommand(command, args, options)
+	_, err := cm.RunCommand(command, args, options)
 	c.Assert(err, IsNil)
 
 	// filename
@@ -5185,7 +5333,7 @@ func (s *OssutilCommandSuite) TestCPObjectUnderEcsmodeWithConfigEcsUrl(c *C) {
 	cpDir := CheckpointDir
 	options = OptionMapType{
 		"endpoint":      &str,
-		"configFile":    &configFile,
+		"configFile":    &cfile,
 		"mode":          &mode,
 		"routines":      &routines,
 		"checkpointDir": &cpDir,
@@ -5205,9 +5353,7 @@ func (s *OssutilCommandSuite) TestCPObjectUnderEcsmodeWithConfigEcsUrl(c *C) {
 	c.Assert(err, IsNil)
 	c.Assert(data, Equals, string(fileBody))
 
-	err = ioutil.WriteFile(configFile, []byte(oldConfigStr), 0664)
-	c.Assert(err, IsNil)
-
+	os.Remove(cfile)
 	os.Remove(downFileName)
 	os.Remove(testFileName)
 
@@ -5225,8 +5371,6 @@ func (s *OssutilCommandSuite) TestCPObjectUnderEcsmodeWithConfigEcsUrl(c *C) {
 	}
 	_, err = cm.RunCommand(command, args, options)
 	c.Assert(err, NotNil)
-
-	s.createFile(configFile, string(oldConfigStr), c)
 }
 
 func (s *OssutilCommandSuite) TestCPObjectUnderEcsmodeWithEmptyEcsUrl(c *C) {
@@ -5388,14 +5532,10 @@ func (s *OssutilCommandSuite) TestCPObjectUnderRamRoleArnmodeWithConfigArn(c *C)
 	bucketName := bucketNamePrefix + randLowStr(12)
 	s.putBucket(bucketName, c)
 
-	oldConfigStr, err := ioutil.ReadFile(configFile)
-	c.Assert(err, IsNil)
-	f, err := os.OpenFile(ConfigFile, os.O_CREATE|os.O_APPEND|os.O_RDWR, 0660)
-	configStr := "ramRoleArn=" + stsARN
-
-	f.WriteString(configStr)
-	f.Close()
-
+	configStr := fmt.Sprintf("[Credentials]\nendpoint=%s\naccessKeyID=%s\naccessKeySecret=%s\n", endpoint, stsAccessID, stsAccessKeySecret)
+	configStr = configStr + "ramRoleArn=" + stsARN
+	cfile := randStr(10)
+	s.createFile(cfile, configStr, c)
 	// prepare file and object
 
 	// filename
@@ -5413,16 +5553,16 @@ func (s *OssutilCommandSuite) TestCPObjectUnderRamRoleArnmodeWithConfigArn(c *C)
 	cpDir := CheckpointDir
 	options := OptionMapType{
 		"endpoint":        &str,
-		"accessKeyID":     &stsAccessID,
-		"accessKeySecret": &stsAccessKeySecret,
-		"configFile":      &configFile,
+		"accessKeyID":     &str,
+		"accessKeySecret": &str,
+		"configFile":      &cfile,
 		"mode":            &mode,
 		"routines":        &routines,
 		"checkpointDir":   &cpDir,
 		"ramRoleArn":      &str,
 	}
 
-	_, err = cm.RunCommand("cp", cpArgs, options)
+	_, err := cm.RunCommand("cp", cpArgs, options)
 	c.Assert(err, IsNil)
 
 	// down object
@@ -5436,9 +5576,7 @@ func (s *OssutilCommandSuite) TestCPObjectUnderRamRoleArnmodeWithConfigArn(c *C)
 	c.Assert(err, IsNil)
 	c.Assert(data, Equals, string(fileBody))
 
-	err = ioutil.WriteFile(configFile, []byte(oldConfigStr), 0664)
-	c.Assert(err, IsNil)
-
+	os.Remove(cfile)
 	os.Remove(downFileName)
 	os.Remove(testFileName)
 	s.removeBucket(bucketName, true, c)
@@ -5629,13 +5767,9 @@ func (s *OssutilCommandSuite) TestCPObjectUnderNomodeWithEmptyAKIdAndEcsUrl(c *C
 	bucketName := bucketNamePrefix + randLowStr(12)
 	s.putBucket(bucketName, c)
 
-	oldConfigStr, err := ioutil.ReadFile(configFile)
-	c.Assert(err, IsNil)
-	fd, _ := os.OpenFile(configFile, os.O_RDWR|os.O_TRUNC|os.O_CREATE, 0664)
 	configStr := "[Credentials]" + "\n" + "language=EN" + "\n" + "endpoint=oss-cn-shenzhen.aliyuncs.com" + "\n"
-
-	fd.WriteString(configStr)
-	fd.Close()
+	cfile := randStr(10)
+	s.createFile(cfile, configStr, c)
 
 	// filename
 	testFileName := "ossutil_test_file" + randStr(5)
@@ -5653,30 +5787,25 @@ func (s *OssutilCommandSuite) TestCPObjectUnderNomodeWithEmptyAKIdAndEcsUrl(c *C
 		"endpoint":        &str,
 		"accessKeyID":     &str,
 		"accessKeySecret": &str,
-		"configFile":      &configFile,
+		"configFile":      &cfile,
 		"routines":        &routines,
 		"checkpointDir":   &cpDir,
 	}
 
-	_, err = cm.RunCommand("cp", cpArgs, options)
+	_, err := cm.RunCommand("cp", cpArgs, options)
 	c.Assert(err, NotNil)
 
-	err = ioutil.WriteFile(configFile, []byte(oldConfigStr), 0664)
-	c.Assert(err, IsNil)
-
+	os.Remove(cfile)
 	os.Remove(testFileName)
 	s.removeBucket(bucketName, true, c)
 }
 
 func (s *OssutilCommandSuite) TestCPObjectUnderNomodeUsingEcsRoleAK(c *C) {
-	oldConfigStr, err := ioutil.ReadFile(configFile)
-	c.Assert(err, IsNil)
-	fd, _ := os.OpenFile(configFile, os.O_RDWR|os.O_TRUNC|os.O_CREATE, 0664)
 	ecsAk := "http://100.100.100.200/latest/meta-data/Ram/security-credentials/" + ecsRoleName
 	configStr := "[Credentials]" + "\n" + "language=EN" + "\n" + "endpoint=" + endpoint + "\n"
 	configStr = configStr + "[AkService]" + "\n" + "ecsAk=" + ecsAk
-	fd.WriteString(configStr)
-	fd.Close()
+	cfile := randStr(10)
+	s.createFile(cfile, configStr, c)
 
 	// create bucket
 	mode := "EcsRamRole"
@@ -5687,9 +5816,9 @@ func (s *OssutilCommandSuite) TestCPObjectUnderNomodeUsingEcsRoleAK(c *C) {
 	options := OptionMapType{
 		"endpoint":   &str,
 		"mode":       &mode,
-		"configFile": &configFile,
+		"configFile": &cfile,
 	}
-	_, err = cm.RunCommand(command, args, options)
+	_, err := cm.RunCommand(command, args, options)
 	c.Assert(err, IsNil)
 
 	// prepare file and object
@@ -5707,7 +5836,7 @@ func (s *OssutilCommandSuite) TestCPObjectUnderNomodeUsingEcsRoleAK(c *C) {
 		"endpoint":        &str,
 		"accessKeyID":     &str,
 		"accessKeySecret": &str,
-		"configFile":      &configFile,
+		"configFile":      &cfile,
 		"routines":        &routines,
 		"checkpointDir":   &cpDir,
 	}
@@ -5734,7 +5863,7 @@ func (s *OssutilCommandSuite) TestCPObjectUnderNomodeUsingEcsRoleAK(c *C) {
 	ok := true
 	options = OptionMapType{
 		"endpoint":   &str,
-		"configFile": &configFile,
+		"configFile": &cfile,
 		"mode":       &mode,
 		"bucket":     &ok,
 		"force":      &ok,
@@ -5744,7 +5873,7 @@ func (s *OssutilCommandSuite) TestCPObjectUnderNomodeUsingEcsRoleAK(c *C) {
 	_, err = cm.RunCommand(command, args, options)
 	c.Assert(err, IsNil)
 	s.removeBucket(bucketName, true, c)
-	s.createFile(configFile, string(oldConfigStr), c)
+	os.Remove(cfile)
 }
 
 func (s *OssutilCommandSuite) TestCPObjectUnderNomodeWithTimeOut(c *C) {
@@ -5949,4 +6078,869 @@ func (s *OssutilCommandSuite) TestCPObjectSkipVerifyCert(c *C) {
 	os.Remove(downFileName)
 	os.Remove(fileName)
 	s.removeBucket(bucketName, true, c)
+}
+
+func (s *OssutilCommandSuite) TestCloudBoxCreateAndDeleteBucket(c *C) {
+	bucketName := bucketNamePrefix + randLowStr(10)
+	s.putBucket(bucketName, c)
+
+	objectContext := randLowStr(1024 * 10)
+	fileName := "ossutil_test." + randLowStr(12)
+	s.createFile(fileName, objectContext, c)
+
+	object := randLowStr(12)
+	cpArgs := []string{fileName, CloudURLToString(bucketName, object)}
+
+	str := ""
+	cpDir := CheckpointDir
+	routines := strconv.Itoa(Routines)
+	options := OptionMapType{
+		"endpoint":        &str,
+		"accessKeyID":     &str,
+		"accessKeySecret": &str,
+		"configFile":      &configFile,
+		"checkpointDir":   &cpDir,
+		"routines":        &routines,
+		"skipVerifyCert":  &str,
+	}
+
+	_, err := cm.RunCommand("cp", cpArgs, options)
+	c.Assert(err, IsNil)
+
+	//down object
+	downFileName := fileName + "-down"
+	dwArgs := []string{CloudURLToString(bucketName, object), downFileName}
+	_, err = cm.RunCommand("cp", dwArgs, options)
+	c.Assert(err, IsNil)
+
+	//compare content
+	fileBody, err := ioutil.ReadFile(downFileName)
+	c.Assert(err, IsNil)
+	c.Assert(objectContext, Equals, string(fileBody))
+
+	os.Remove(downFileName)
+	os.Remove(fileName)
+	s.removeBucket(bucketName, true, c)
+}
+
+func (s *OssutilCommandSuite) TestCpCmdWithTimeSingleObject(c *C) {
+	bucketName := bucketNamePrefix + randLowStr(10)
+	s.putBucket(bucketName, c)
+
+	objectContent := randLowStr(10)
+	fileName := "ossutil_test." + randLowStr(12)
+	s.createFile(fileName, objectContent, c)
+
+	object := randLowStr(12)
+	cpArgs := []string{fileName, CloudURLToString(bucketName, object)}
+
+	cpDir := CheckpointDir
+	maxTime := time.Now().Add(+10 * time.Second).Unix()
+	c.Log(maxTime)
+	minTime := time.Now().Add(-10 * time.Second).Unix()
+	endTime := time.Now().Add(+20 * time.Second).Unix()
+	str := ""
+	force := true
+	routines := strconv.Itoa(Routines)
+	options := OptionMapType{
+		"endpoint":        &str,
+		"accessKeyID":     &str,
+		"accessKeySecret": &str,
+		"configFile":      &configFile,
+		"checkpointDir":   &cpDir,
+		OptionForce:       &force,
+		"routines":        &routines,
+	}
+
+	_, err := cm.RunCommand("cp", cpArgs, options)
+	c.Assert(err, IsNil)
+
+	downFileName := fileName + "-down"
+	dwArgs := []string{CloudURLToString(bucketName, object), downFileName}
+	_, err = cm.RunCommand("cp", dwArgs, options)
+	c.Assert(err, IsNil)
+
+	fileBody, err := ioutil.ReadFile(downFileName)
+	c.Assert(err, IsNil)
+	c.Assert(objectContent, Equals, string(fileBody))
+
+	options[OptionStartTime] = &maxTime
+	options[OptionEndTime] = &minTime
+	object2 := object + "2"
+	cpArgs = []string{fileName, CloudURLToString(bucketName, object2)}
+	_, err = cm.RunCommand("cp", cpArgs, options)
+	c.Assert(err, NotNil)
+	c.Assert(strings.Contains(err.Error(), "start time"), Equals, true)
+
+	delete(options, OptionStartTime)
+	delete(options, OptionEndTime)
+	options[OptionStartTime] = &minTime
+	options[OptionEndTime] = &maxTime
+	object3 := object + "3"
+	cpArgs = []string{fileName, CloudURLToString(bucketName, object3)}
+	_, err = cm.RunCommand("cp", cpArgs, options)
+	c.Assert(err, IsNil)
+	time.Sleep(2 * time.Second)
+
+	downFileName3 := fileName + "-down3"
+	dwArgs = []string{CloudURLToString(bucketName, object3), downFileName3}
+	_, err = cm.RunCommand("cp", dwArgs, options)
+	c.Assert(err, IsNil)
+	fileBody, err = ioutil.ReadFile(downFileName3)
+	c.Assert(err, IsNil)
+	c.Assert(objectContent, Equals, string(fileBody))
+	c.Log(string(fileBody))
+	time.Sleep(2 * time.Second)
+
+	delete(options, OptionStartTime)
+	delete(options, OptionEndTime)
+	options[OptionStartTime] = &minTime
+	downFileName4 := fileName + "-down4"
+	dwArgs = []string{CloudURLToString(bucketName, object3), downFileName4}
+	c.Log(dwArgs)
+	c.Log(options)
+	_, err = cm.RunCommand("cp", dwArgs, options)
+	c.Assert(err, IsNil)
+
+	time.Sleep(2 * time.Second)
+
+	fileBody, err = ioutil.ReadFile(downFileName4)
+	c.Assert(err, IsNil)
+	c.Assert(objectContent, Equals, string(fileBody))
+
+	delete(options, OptionStartTime)
+	delete(options, OptionEndTime)
+	options[OptionStartTime] = &maxTime
+	downFileName5 := fileName + "-down5"
+	dwArgs = []string{CloudURLToString(bucketName, object3), downFileName5}
+	_, err = cm.RunCommand("cp", dwArgs, options)
+	c.Assert(err, IsNil)
+
+	fileBody, err = ioutil.ReadFile(downFileName5)
+	c.Log(string(fileBody))
+	c.Assert(err, NotNil)
+
+	delete(options, OptionStartTime)
+	delete(options, OptionEndTime)
+	options[OptionEndTime] = &minTime
+	downFileName6 := fileName + "-down6"
+	dwArgs = []string{CloudURLToString(bucketName, object3), downFileName6}
+	_, err = cm.RunCommand("cp", dwArgs, options)
+	c.Assert(err, IsNil)
+
+	fileBody, err = ioutil.ReadFile(downFileName6)
+	c.Log(string(fileBody))
+	c.Assert(err, NotNil)
+
+	delete(options, OptionStartTime)
+	delete(options, OptionEndTime)
+	options[OptionStartTime] = &maxTime
+	options[OptionEndTime] = &endTime
+	downFileName7 := fileName + "-down7"
+	dwArgs = []string{CloudURLToString(bucketName, object3), downFileName7}
+	_, err = cm.RunCommand("cp", dwArgs, options)
+	c.Assert(err, IsNil)
+
+	fileBody, err = ioutil.ReadFile(downFileName7)
+	c.Log(string(fileBody))
+	c.Assert(err, NotNil)
+
+	s.clearObjects(bucketName, "", c)
+
+	// cp bucket to other bucket
+	optionsCopy := OptionMapType{
+		"endpoint":        &str,
+		"accessKeyID":     &str,
+		"accessKeySecret": &str,
+		"configFile":      &configFile,
+		"checkpointDir":   &cpDir,
+		OptionForce:       &force,
+		"routines":        &routines,
+	}
+	maxTime = time.Now().Add(+10 * time.Second).Unix()
+	minTime = time.Now().Add(-10 * time.Second).Unix()
+	endTime = time.Now().Add(+20 * time.Second).Unix()
+
+	s.putObject(bucketName, object, fileName, c)
+	cpArgs = []string{CloudURLToString(bucketName, object), CloudURLToString(bucketNameExist, object)}
+	_, err = cm.RunCommand("cp", cpArgs, optionsCopy)
+	c.Assert(err, IsNil)
+
+	downCopyName := fileName + "-copy"
+	s.getObject(bucketNameExist, object, downCopyName, c)
+	contentCopy := s.readFile(downCopyName, c)
+	c.Assert(objectContent, Equals, contentCopy)
+
+	optionsCopy[OptionStartTime] = &maxTime
+	optionsCopy[OptionEndTime] = &minTime
+	cpArgs = []string{CloudURLToString(bucketName, object), CloudURLToString(bucketNameExist, object2)}
+	_, err = cm.RunCommand("cp", cpArgs, optionsCopy)
+	c.Assert(err, NotNil)
+	c.Assert(strings.Contains(err.Error(), "start time"), Equals, true)
+
+	delete(options, OptionStartTime)
+	delete(options, OptionEndTime)
+	cpArgs = []string{CloudURLToString(bucketName, object), CloudURLToString(bucketNameExist, object3)}
+	optionsCopy[OptionStartTime] = &minTime
+	optionsCopy[OptionEndTime] = &maxTime
+	_, err = cm.RunCommand("cp", cpArgs, optionsCopy)
+	c.Assert(err, IsNil)
+
+	downCopyName3 := fileName + "-copy3"
+	s.getObject(bucketNameExist, object3, downCopyName3, c)
+	contentCopy3 := s.readFile(downCopyName, c)
+	c.Assert(objectContent, Equals, contentCopy3)
+
+	delete(optionsCopy, OptionStartTime)
+	delete(optionsCopy, OptionEndTime)
+	optionsCopy[OptionStartTime] = &minTime
+	object4 := object + "4"
+	cpArgs = []string{CloudURLToString(bucketName, object), CloudURLToString(bucketNameExist, object4)}
+	_, err = cm.RunCommand("cp", cpArgs, optionsCopy)
+	c.Assert(err, IsNil)
+
+	downCopyName4 := fileName + "-copy4"
+	s.getObject(bucketNameExist, object4, downCopyName4, c)
+	contentCopy4 := s.readFile(downCopyName, c)
+	c.Assert(objectContent, Equals, contentCopy4)
+
+	delete(optionsCopy, OptionStartTime)
+	delete(optionsCopy, OptionEndTime)
+	optionsCopy[OptionEndTime] = &maxTime
+	object5 := object + "5"
+	cpArgs = []string{CloudURLToString(bucketName, object), CloudURLToString(bucketNameExist, object5)}
+	_, err = cm.RunCommand("cp", cpArgs, optionsCopy)
+	c.Assert(err, IsNil)
+
+	downCopyName5 := fileName + "-copy5"
+	s.getObject(bucketNameExist, object5, downCopyName5, c)
+	contentCopy5 := s.readFile(downCopyName5, c)
+	c.Assert(objectContent, Equals, contentCopy5)
+
+	delete(optionsCopy, OptionStartTime)
+	delete(optionsCopy, OptionEndTime)
+	optionsCopy[OptionEndTime] = &minTime
+	object6 := object + "6"
+	cpArgs = []string{CloudURLToString(bucketName, object), CloudURLToString(bucketNameExist, object6)}
+	_, err = cm.RunCommand("cp", cpArgs, optionsCopy)
+	c.Assert(err, IsNil)
+
+	downCopyName6 := fileName + "-copy6"
+	args := []string{CloudURLToString(bucketNameExist, object6), downCopyName6}
+	_, err = s.rawCPWithArgs(args, false, true, false, DefaultBigFileThreshold, CheckpointDir)
+	c.Assert(err, NotNil)
+	c.Assert(strings.Contains(err.Error(), "The specified key does not exist"), Equals, true)
+
+	delete(optionsCopy, OptionStartTime)
+	delete(optionsCopy, OptionEndTime)
+	optionsCopy[OptionStartTime] = &maxTime
+	optionsCopy[OptionEndTime] = &endTime
+
+	object7 := object + "7"
+	cpArgs = []string{CloudURLToString(bucketName, object), CloudURLToString(bucketNameExist, object7)}
+	_, err = cm.RunCommand("cp", cpArgs, optionsCopy)
+	c.Assert(err, IsNil)
+
+	downCopyName7 := fileName + "-copy7"
+	args = []string{CloudURLToString(bucketNameExist, object7), downCopyName7}
+	_, err = s.rawCPWithArgs(args, false, true, false, DefaultBigFileThreshold, CheckpointDir)
+	c.Assert(err, NotNil)
+	c.Assert(strings.Contains(err.Error(), "The specified key does not exist"), Equals, true)
+
+	delete(optionsCopy, OptionStartTime)
+	delete(optionsCopy, OptionEndTime)
+	optionsCopy[OptionStartTime] = &maxTime
+	object8 := object + "8"
+	cpArgs = []string{CloudURLToString(bucketName, object), CloudURLToString(bucketNameExist, object8)}
+	_, err = cm.RunCommand("cp", cpArgs, optionsCopy)
+	c.Assert(err, IsNil)
+
+	downCopyName8 := fileName + "-copy8"
+	args = []string{CloudURLToString(bucketNameExist, object8), downCopyName8}
+	_, err = s.rawCPWithArgs(args, false, true, false, DefaultBigFileThreshold, CheckpointDir)
+	c.Assert(err, NotNil)
+	c.Assert(strings.Contains(err.Error(), "The specified key does not exist"), Equals, true)
+
+	s.clearObjects(bucketName, "", c)
+	os.Remove(downFileName)
+	os.Remove(fileName)
+	os.Remove(downFileName3)
+	os.Remove(downFileName4)
+	os.Remove(downFileName5)
+	os.Remove(downFileName6)
+	os.Remove(downFileName7)
+	os.Remove(downCopyName)
+	os.Remove(downCopyName3)
+	os.Remove(downCopyName4)
+	os.Remove(downCopyName5)
+	s.removeBucket(bucketName, true, c)
+}
+
+func (s *OssutilCommandSuite) TestCpCmdWithTimeDir(c *C) {
+	bucketName := bucketNamePrefix + randLowStr(10)
+	s.putBucket(bucketName, c)
+
+	//objectContext := randLowStr(10)
+	dir := "testdir-inc1" + randLowStr(5)
+	subdir := "dir1"
+	contents := map[string]string{}
+	filenames := s.createTestFiles(dir, subdir, c, contents)
+
+	cpArgs := []string{dir + "/", CloudURLToString(bucketName, dir+"/")}
+	cpDir := CheckpointDir
+	maxTime := time.Now().Add(+10 * time.Second).Unix()
+	c.Log(maxTime)
+	minTime := time.Now().Add(-10 * time.Second).Unix()
+
+	endTime := time.Now().Add(+20 * time.Second).Unix()
+	force := true
+	recursion := true
+	routines := strconv.Itoa(Routines)
+	str := ""
+	optionsDir := OptionMapType{
+		"endpoint":        &str,
+		"accessKeyID":     &str,
+		"accessKeySecret": &str,
+		"configFile":      &configFile,
+		"checkpointDir":   &cpDir,
+		OptionForce:       &force,
+		"routines":        &routines,
+		OptionRecursion:   &recursion,
+	}
+
+	_, err := cm.RunCommand("cp", cpArgs, optionsDir)
+	c.Assert(err, IsNil)
+
+	downDir := "cp-down-dir" + randLowStr(5)
+	dwArgs := []string{CloudURLToString(bucketName, dir+"/"), downDir}
+	_, err = cm.RunCommand("cp", dwArgs, optionsDir)
+	c.Assert(err, IsNil)
+
+	cpArgs = []string{CloudURLToString(bucketName, dir+"/"), CloudURLToString(bucketNameExist, dir+"/")}
+	_, err = cm.RunCommand("cp", cpArgs, optionsDir)
+	c.Assert(err, IsNil)
+
+	objectsExist := s.listObjects(bucketNameExist, dir, "ls -", c)
+	s.clearObjects(bucketNameExist, "", c)
+	var count, count1, count2 int
+	err = filepath.Walk(downDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() {
+			count++
+		}
+		return nil
+	})
+	c.Assert(err, IsNil)
+
+	for _, filename := range filenames {
+		fileInfo, _ := os.Stat(dir + "/" + filename)
+		if fileInfo.Size() > 0 {
+			count1++
+		}
+	}
+	for _, object := range objectsExist {
+		lastChar := object[len(object)-1:]
+		if lastChar != "/" {
+			count2++
+		}
+	}
+	c.Assert(count, Equals, count2)
+	c.Assert(count, Equals, count1)
+
+	s.clearObjects(bucketName, "", c)
+	os.RemoveAll(downDir)
+
+	optionsDir[OptionStartTime] = &maxTime
+	optionsDir[OptionEndTime] = &minTime
+	cpArgs = []string{dir + "/", CloudURLToString(bucketName, dir)}
+	_, err = cm.RunCommand("cp", cpArgs, optionsDir)
+	c.Assert(err, NotNil)
+	c.Assert(strings.Contains(err.Error(), "start time"), Equals, true)
+
+	delete(optionsDir, OptionStartTime)
+	delete(optionsDir, OptionEndTime)
+	_, err = cm.RunCommand("cp", cpArgs, optionsDir)
+	c.Assert(err, IsNil)
+	optionsDir[OptionStartTime] = &maxTime
+	optionsDir[OptionEndTime] = &minTime
+	cpArgs = []string{CloudURLToString(bucketName, dir+"/"), CloudURLToString(bucketNameExist, dir+"/")}
+	_, err = cm.RunCommand("cp", cpArgs, optionsDir)
+	c.Assert(err, NotNil)
+	c.Assert(strings.Contains(err.Error(), "start time"), Equals, true)
+
+	delete(optionsDir, OptionStartTime)
+	delete(optionsDir, OptionEndTime)
+	cpArgs = []string{dir + "/", CloudURLToString(bucketName, dir)}
+	optionsDir[OptionStartTime] = &minTime
+	optionsDir[OptionEndTime] = &maxTime
+	_, err = cm.RunCommand("cp", cpArgs, optionsDir)
+	c.Assert(err, IsNil)
+
+	cpArgs = []string{CloudURLToString(bucketName, dir+"/"), CloudURLToString(bucketNameExist, dir+"/")}
+	_, err = cm.RunCommand("cp", cpArgs, optionsDir)
+	c.Assert(err, IsNil)
+
+	objectsExist = s.listLimitedMarker(bucketNameExist, dir+"/", "ls ", -1, "", "", c)
+	s.clearObjects(bucketNameExist, "", c)
+	testLogger.Println(objectsExist)
+	downDir3 := downDir + "3"
+	dwArgs = []string{CloudURLToString(bucketName, dir+"/"), downDir3}
+	_, err = cm.RunCommand("cp", dwArgs, optionsDir)
+	c.Assert(err, IsNil)
+
+	count = 0
+	count1 = 0
+	count2 = 0
+	err = filepath.Walk(downDir3, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() {
+			count++
+		}
+		return nil
+	})
+	c.Assert(err, IsNil)
+
+	for _, filename := range filenames {
+		fileInfo, _ := os.Stat(dir + "/" + filename)
+		end := time.Unix(maxTime, 0)
+		start := time.Unix(minTime, 0)
+		if fileInfo.ModTime().Before(end) && fileInfo.ModTime().After(start) {
+			count1++
+		}
+	}
+	for _, object := range objectsExist {
+		lastChar := object[len(object)-1:]
+		if lastChar != "/" {
+			count2++
+		}
+	}
+	c.Assert(count, Equals, count2)
+	c.Assert(count, Equals, count1)
+	s.clearObjects(bucketName, "", c)
+	os.RemoveAll(downDir3)
+
+	cpArgs = []string{dir + "/", CloudURLToString(bucketName, dir)}
+	delete(optionsDir, OptionStartTime)
+	delete(optionsDir, OptionEndTime)
+	optionsDir[OptionEndTime] = &minTime
+	_, err = cm.RunCommand("cp", cpArgs, optionsDir)
+	c.Assert(err, IsNil)
+
+	cpArgs = []string{CloudURLToString(bucketName, dir+"/"), CloudURLToString(bucketNameExist, dir+"/")}
+	_, err = cm.RunCommand("cp", cpArgs, optionsDir)
+	c.Assert(err, IsNil)
+
+	objectsExist = s.listLimitedMarker(bucketNameExist, "", "ls ", -1, "", "", c)
+	s.clearObjects(bucketNameExist, "", c)
+
+	downDir4 := downDir + "4"
+	dwArgs = []string{CloudURLToString(bucketName, dir+"/"), downDir4}
+	_, err = cm.RunCommand("cp", dwArgs, optionsDir)
+	c.Assert(err, IsNil)
+
+	count = 0
+	count1 = 0
+	count2 = 0
+	err = filepath.Walk(downDir4, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() {
+			count++
+		}
+		return nil
+	})
+	c.Assert(err, IsNil)
+
+	for _, filename := range filenames {
+		fileInfo, _ := os.Stat(dir + "/" + filename)
+		t := time.Unix(minTime, 0)
+		if !fileInfo.ModTime().After(t) {
+			count1++
+		}
+	}
+	for _, object := range objectsExist {
+		lastChar := object[len(object)-1:]
+		if lastChar != "/" {
+			count2++
+		}
+	}
+	c.Assert(count, Equals, count2)
+	c.Assert(count, Equals, count1)
+	c.Assert(count, Equals, len(objectsExist))
+	s.clearObjects(bucketName, "", c)
+	os.RemoveAll(downDir4)
+
+	cpArgs = []string{dir + "/", CloudURLToString(bucketName, dir)}
+	delete(optionsDir, OptionStartTime)
+	delete(optionsDir, OptionEndTime)
+	optionsDir[OptionStartTime] = &maxTime
+	_, err = cm.RunCommand("cp", cpArgs, optionsDir)
+	c.Assert(err, IsNil)
+
+	cpArgs = []string{CloudURLToString(bucketName, dir+"/"), CloudURLToString(bucketNameExist, dir+"/")}
+	_, err = cm.RunCommand("cp", cpArgs, optionsDir)
+	c.Assert(err, IsNil)
+
+	objectsExist = s.listLimitedMarker(bucketNameExist, "", "ls ", -1, "", "", c)
+	s.clearObjects(bucketNameExist, "", c)
+
+	downDir5 := downDir + "5"
+	dwArgs = []string{CloudURLToString(bucketName, dir+"/"), downDir5}
+	_, err = cm.RunCommand("cp", dwArgs, optionsDir)
+	c.Assert(err, IsNil)
+
+	count = 0
+	count1 = 0
+	count2 = 0
+	err = filepath.Walk(downDir5, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() {
+			count++
+		}
+		return nil
+	})
+	c.Assert(err, IsNil)
+
+	for _, filename := range filenames {
+		fileInfo, _ := os.Stat(dir + "/" + filename)
+		t := time.Unix(maxTime, 0)
+		if !fileInfo.ModTime().Before(t) {
+			count1++
+		}
+	}
+	for _, object := range objectsExist {
+		lastChar := object[len(object)-1:]
+		if lastChar != "/" {
+			count2++
+		}
+	}
+	c.Assert(count, Equals, count2)
+	c.Assert(count, Equals, count1)
+	os.RemoveAll(downDir5)
+	s.clearObjects(bucketName, "", c)
+
+	delete(optionsDir, OptionStartTime)
+	delete(optionsDir, OptionEndTime)
+	optionsDir[OptionStartTime] = &maxTime
+	optionsDir[OptionEndTime] = &maxTime
+	_, err = cm.RunCommand("cp", cpArgs, optionsDir)
+	c.Assert(err, IsNil)
+
+	cpArgs = []string{CloudURLToString(bucketName, dir+"/"), CloudURLToString(bucketNameExist, dir+"/")}
+	_, err = cm.RunCommand("cp", cpArgs, optionsDir)
+	c.Assert(err, IsNil)
+
+	objectsExist = s.listLimitedMarker(bucketNameExist, "", "ls ", -1, "", "", c)
+	s.clearObjects(bucketNameExist, "", c)
+
+	downDir6 := downDir + "6"
+	dwArgs = []string{CloudURLToString(bucketName, dir+"/"), downDir6}
+	_, err = cm.RunCommand("cp", dwArgs, optionsDir)
+	c.Assert(err, IsNil)
+
+	count = 0
+	count1 = 0
+	count2 = 0
+	err = filepath.Walk(downDir6, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() {
+			count++
+		}
+		return nil
+	})
+	c.Assert(err, IsNil)
+
+	for _, filename := range filenames {
+		fileInfo, _ := os.Stat(dir + "/" + filename)
+		end := time.Unix(endTime, 0)
+		start := time.Unix(maxTime, 0)
+		if fileInfo.ModTime().Before(end) && fileInfo.ModTime().After(start) {
+			count1++
+		}
+	}
+	for _, object := range objectsExist {
+		lastChar := object[len(object)-1:]
+		if lastChar != "/" {
+			count2++
+		}
+	}
+	c.Assert(count, Equals, count2)
+	c.Assert(count, Equals, count1)
+	os.RemoveAll(downDir5)
+	s.clearObjects(bucketName, "", c)
+
+	s.removeBucket(bucketName, true, c)
+}
+
+// Test: --start-time & --end-time
+func (s *OssutilCommandSuite) TestBatchCPFileToObjectWithStartTimeAndEndTime(c *C) {
+	bucketName := bucketNamePrefix + randLowStr(10)
+	s.putBucket(bucketName, c)
+	bucketStr := CloudURLToString(bucketName, "")
+
+	dir := "testdir-time" + randLowStr(5)
+	err := os.MkdirAll(dir, 0755)
+	c.Assert(err, IsNil)
+
+	var fileinfos []os.FileInfo
+	num := 5
+	for i := 0; i < num; i++ {
+		content := "hello world"
+		filename := fmt.Sprintf("%s%sfilename-%d", dir, string(os.PathSeparator), i)
+		s.createFile(filename, content, c)
+		info, err := os.Lstat(filename)
+		c.Assert(err, IsNil)
+		fileinfos = append(fileinfos, info)
+		time.Sleep(time.Second * 2)
+	}
+
+	//cp 1,2,3,4
+	// e.g., ossutil cp testdir-inc/ oss://tempb4 -rf --start-time fileinfos[1].ModTime().Unix()
+	// upload files
+	args := []string{dir, bucketStr}
+	cpDir := CheckpointDir
+	force := true
+	recursion := true
+	routines := 1
+	str := ""
+	optionsDir := OptionMapType{
+		"endpoint":        &str,
+		"accessKeyID":     &str,
+		"accessKeySecret": &str,
+		"configFile":      &configFile,
+		"checkpointDir":   &cpDir,
+		OptionForce:       &force,
+		"routines":        &routines,
+		OptionRecursion:   &recursion,
+	}
+	startTime := fileinfos[1].ModTime().Unix()
+	optionsDir[OptionStartTime] = &startTime
+	_, err = cm.RunCommand("cp", args, optionsDir)
+	c.Assert(err, IsNil)
+
+	objects := s.listObjects(bucketName, "", "ls -s", c)
+	c.Assert(len(objects), Equals, num-1)
+	for i := 1; i < num; i++ {
+		c.Assert(objects[i-1], Equals, fileinfos[i].Name())
+	}
+
+	//cp 2,3
+	s.clearObjects(bucketName, "", c)
+	startTime = fileinfos[2].ModTime().Unix()
+	endTime := fileinfos[3].ModTime().Unix()
+	optionsDir[OptionStartTime] = &startTime
+	optionsDir[OptionEndTime] = &endTime
+	_, err = cm.RunCommand("cp", args, optionsDir)
+	c.Assert(err, IsNil)
+
+	objects = s.listObjects(bucketName, "", "ls -s", c)
+	c.Assert(len(objects), Equals, 2)
+	for i := 2; i <= 3; i++ {
+		c.Assert(objects[i-2], Equals, fileinfos[i].Name())
+	}
+
+	// cleanup
+	os.RemoveAll(dir)
+	s.removeBucket(bucketName, true, c)
+}
+
+var timeFormats = []string{
+	"2006-01-02 15:04:05",
+}
+
+// parse the date as time in various date formats
+func parseTimeDates(date string) (t time.Time, err error) {
+	var instant time.Time
+	for _, timeFormat := range timeFormats {
+		instant, err = time.ParseInLocation(timeFormat, date[:len(timeFormat)], time.Local)
+		if err == nil {
+			return instant, nil
+		}
+	}
+	return t, err
+}
+
+// Test: --start-time & --end-time
+func (s *OssutilCommandSuite) TestBatchCPObjectToFiletWithStartTimeAndEndTime(c *C) {
+	bucketName := bucketNamePrefix + randLowStr(10)
+	s.putBucket(bucketName, c)
+	bucketStr := CloudURLToString(bucketName, "")
+
+	dir := "testdir-time" + randLowStr(5)
+	err := os.MkdirAll(dir, 0755)
+	c.Assert(err, IsNil)
+
+	content := "hello world"
+	filename := fmt.Sprintf("%s%stmp.txt", dir, string(os.PathSeparator))
+	s.createFile(filename, content, c)
+
+	num := 5
+	for i := 0; i < num; i++ {
+		key := fmt.Sprintf("filename-%d", i)
+		s.putObject(bucketName, key, filename, c)
+		time.Sleep(time.Second * 2)
+	}
+	objects := s.listObjects(bucketName, "", "ls -s", c)
+	c.Assert(len(objects), Equals, num)
+	os.Remove(filename)
+
+	//cp 1,2,3,4
+	// e.g., ossutil cp oss://tempb4  testdir-inc/ -rf --start-time objects[1].ModTime().Unix()
+	// upload files
+	args := []string{bucketStr, dir}
+	cpDir := CheckpointDir
+	force := true
+	recursion := true
+	routines := 1
+	str := ""
+	optionsDir := OptionMapType{
+		"endpoint":        &str,
+		"accessKeyID":     &str,
+		"accessKeySecret": &str,
+		"configFile":      &configFile,
+		"checkpointDir":   &cpDir,
+		OptionForce:       &force,
+		"routines":        &routines,
+		OptionRecursion:   &recursion,
+	}
+
+	stat := s.getStat(bucketName, objects[1], c)
+	t, err := parseTimeDates((stat[StatLastModified]))
+	c.Assert(err, IsNil)
+	startTime := t.Unix()
+	optionsDir[OptionStartTime] = &startTime
+
+	_, err = cm.RunCommand("cp", args, optionsDir)
+	c.Assert(err, IsNil)
+	files, err := s.getFileList(dir)
+	c.Assert(len(files), Equals, num-1)
+	for i := 1; i < num; i++ {
+		c.Assert(files[i-1], Equals, objects[i])
+	}
+
+	//2,3
+	os.RemoveAll(dir)
+	err = os.MkdirAll(dir, 0755)
+	c.Assert(err, IsNil)
+
+	stat = s.getStat(bucketName, objects[2], c)
+	t, err = parseTimeDates((stat[StatLastModified]))
+	c.Assert(err, IsNil)
+	startTime = t.Unix()
+
+	stat = s.getStat(bucketName, objects[3], c)
+	t, err = parseTimeDates((stat[StatLastModified]))
+	c.Assert(err, IsNil)
+	endTime := t.Unix()
+
+	optionsDir[OptionStartTime] = &startTime
+	optionsDir[OptionEndTime] = &endTime
+	_, err = cm.RunCommand("cp", args, optionsDir)
+	c.Assert(err, IsNil)
+	files, err = s.getFileList(dir)
+	c.Assert(len(files), Equals, 2)
+	for i := 2; i <= 3; i++ {
+		c.Assert(files[i-2], Equals, objects[i])
+	}
+
+	// cleanup
+	os.RemoveAll(dir)
+	s.removeBucket(bucketName, true, c)
+}
+
+// Test: --start-time & --end-time
+func (s *OssutilCommandSuite) TestBatchCPObjectToObjectWithStartTimeAndEndTime(c *C) {
+	bucketName := bucketNamePrefix + randLowStr(10)
+	bucketName2 := bucketName + "-cp"
+	s.putBucket(bucketName, c)
+	s.putBucket(bucketName2, c)
+	bucketStr := CloudURLToString(bucketName, "")
+	bucket2Str := CloudURLToString(bucketName2, "")
+
+	dir := "testdir-time" + randLowStr(5)
+	err := os.MkdirAll(dir, 0755)
+	c.Assert(err, IsNil)
+
+	content := "hello world"
+	filename := fmt.Sprintf("%s%stmp.txt", dir, string(os.PathSeparator))
+	s.createFile(filename, content, c)
+
+	num := 5
+	for i := 0; i < num; i++ {
+		key := fmt.Sprintf("filename-%d", i)
+		s.putObject(bucketName, key, filename, c)
+		time.Sleep(time.Second * 2)
+	}
+	objects := s.listObjects(bucketName, "", "ls -s", c)
+	c.Assert(len(objects), Equals, num)
+	os.RemoveAll(dir)
+
+	//cp 1,2,3,4
+	// e.g., ossutil cp oss://tempb4  testdir-inc/ -rf --start-time objects[1].ModTime().Unix()
+	// upload files
+	args := []string{bucketStr, bucket2Str}
+	cpDir := CheckpointDir
+	force := true
+	recursion := true
+	routines := 1
+	str := ""
+	optionsDir := OptionMapType{
+		"endpoint":        &str,
+		"accessKeyID":     &str,
+		"accessKeySecret": &str,
+		"configFile":      &configFile,
+		"checkpointDir":   &cpDir,
+		OptionForce:       &force,
+		"routines":        &routines,
+		OptionRecursion:   &recursion,
+	}
+
+	stat := s.getStat(bucketName, objects[1], c)
+	t, err := parseTimeDates((stat[StatLastModified]))
+	c.Assert(err, IsNil)
+
+	startTime := t.Unix()
+	optionsDir[OptionStartTime] = &startTime
+	_, err = cm.RunCommand("cp", args, optionsDir)
+	c.Assert(err, IsNil)
+	objects2 := s.listObjects(bucketName2, "", "ls -s", c)
+	c.Assert(len(objects2), Equals, num-1)
+	for i := 1; i < num; i++ {
+		c.Assert(objects2[i-1], Equals, objects[i])
+	}
+
+	//2,3
+	s.clearObjects(bucketName2, "", c)
+	stat = s.getStat(bucketName, objects[2], c)
+	t, err = parseTimeDates((stat[StatLastModified]))
+	c.Assert(err, IsNil)
+	startTime = t.Unix()
+
+	stat = s.getStat(bucketName, objects[3], c)
+	t, err = parseTimeDates((stat[StatLastModified]))
+	c.Assert(err, IsNil)
+	endTime := t.Unix()
+
+	optionsDir[OptionStartTime] = &startTime
+	optionsDir[OptionEndTime] = &endTime
+	_, err = cm.RunCommand("cp", args, optionsDir)
+	c.Assert(err, IsNil)
+	objects2 = s.listObjects(bucketName2, "", "ls -s", c)
+	c.Assert(len(objects2), Equals, 2)
+	for i := 2; i <= 3; i++ {
+		c.Assert(objects2[i-2], Equals, objects[i])
+	}
+
+	// cleanup
+	s.removeBucket(bucketName, true, c)
+	s.removeBucket(bucketName2, true, c)
 }
