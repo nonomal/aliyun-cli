@@ -4,7 +4,7 @@
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
+//	http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -19,28 +19,24 @@ import (
 	"strings"
 
 	_ "embed"
-
-	jmespath "github.com/jmespath/go-jmespath"
 )
 
 type Repository struct {
 	Products []Product
 	Names    []string
 
-	index  map[string]Product
-	reader Reader
+	index map[string]Product
 }
 
-func LoadRepository(reader Reader) *Repository {
+func LoadRepository() *Repository {
 	var e ProductSet
-	err := ReadJsonFrom(reader, "products.json", &e)
+	err := ReadJsonFrom("products.json", &e)
 	if err != nil {
 		panic(err)
 	}
 
 	r := Repository{
-		index:  make(map[string]Product),
-		reader: reader,
+		index: make(map[string]Product),
 	}
 	for _, product := range e.Products {
 		name := strings.ToLower(product.Code)
@@ -70,7 +66,7 @@ func (a *Repository) GetApi(productCode string, version string, apiName string) 
 		return result, false
 	}
 
-	err := ReadJsonFrom(a.reader, strings.ToLower(product.Code)+"/"+apiName+".json", &result)
+	err := ReadJsonFrom(strings.ToLower(product.Code)+"/"+apiName+".json", &result)
 	if err != nil {
 		return result, false
 	}
@@ -81,16 +77,44 @@ func (a *Repository) GetApi(productCode string, version string, apiName string) 
 //go:embed versions.json
 var versions []byte
 
+// [
+// 	{
+// 	"code": "aegis",
+// 	"styles": [
+// 		{
+// 			"style": "RPC",
+// 			"version": "2016-11-11"
+// 		}
+// 	]
+// }
+// ]
+
+type ProductStyle struct {
+	Code   string  `json:"code"`
+	Styles []Style `json:"styles"`
+}
+
+type Style struct {
+	Style   string `json:"style"`
+	Version string `json:"version"`
+}
+
 func (a *Repository) GetStyle(productCode, version string) (string, bool) {
-	v := new(interface{})
-	err := json.Unmarshal(versions, v)
+	productStyles := new([]ProductStyle)
+	err := json.Unmarshal(versions, &productStyles)
 	if err != nil {
 		return "", false
 	}
-	styles, _ := jmespath.Search("[?code=='"+productCode+"'].styles[]", *v)
-	style, _ := jmespath.Search("[?version=='"+version+"'].style", styles)
-	if len(style.([]interface{})) == 0 {
-		return "", false
+
+	for _, p := range *productStyles {
+		if p.Code == productCode {
+			for _, s := range p.Styles {
+				if s.Version == version {
+					return s.Style, true
+				}
+			}
+		}
 	}
-	return style.([]interface{})[0].(string), true
+
+	return "", false
 }

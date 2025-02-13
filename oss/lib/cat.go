@@ -111,8 +111,12 @@ var catCommand = CatCommand{
 			OptionReadTimeout,
 			OptionConnectTimeout,
 			OptionSTSRegion,
-			OptionSkipVerfiyCert,
+			OptionSkipVerifyCert,
 			OptionUserAgent,
+			OptionSignVersion,
+			OptionRegion,
+			OptionCloudBoxID,
+			OptionForcePathStyle,
 		},
 	},
 }

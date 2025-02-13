@@ -1,7 +1,6 @@
 package lib
 
 import (
-	"encoding/xml"
 	"fmt"
 	"io/ioutil"
 	"os"
@@ -18,7 +17,7 @@ var specChineseBucketLifeCycle = SpecText{
 	syntaxText: ` 
 	ossutil lifecycle --method put oss://bucket local_xml_file [options]
     ossutil lifecycle --method get oss://bucket [local_file] [options]
-    ossuitl lifecycle --method delete oss://bucket [options]
+    ossutil lifecycle --method delete oss://bucket [options]
 `,
 	detailHelpText: ` 
     lifecycle命令通过设置method选项值为put、get、delete,可以设置、查询或者删除bucket的lifecycle配置
@@ -79,7 +78,7 @@ var specEnglishBucketLifeCycle = SpecText{
 	syntaxText: ` 
 	ossutil lifecycle --method put oss://bucket local_xml_file [options]
     ossutil lifecycle --method get oss://bucket [local_xml_file] [options]
-    ossuitl lifecycle --method delete oss://bucket [options]
+    ossutil lifecycle --method delete oss://bucket [options]
 `,
 	detailHelpText: ` 
     lifecycle command can set, get and delete the lifecycle configuration of the oss bucket by
@@ -173,8 +172,12 @@ var bucketLifeCycleCommand = BucketLifeCycleCommand{
 			OptionReadTimeout,
 			OptionConnectTimeout,
 			OptionSTSRegion,
-			OptionSkipVerfiyCert,
+			OptionSkipVerifyCert,
 			OptionUserAgent,
+			OptionSignVersion,
+			OptionRegion,
+			OptionCloudBoxID,
+			OptionForcePathStyle,
 		},
 	},
 }
@@ -277,12 +280,7 @@ func (blc *BucketLifeCycleCommand) GetBucketLifecycle() error {
 		return err
 	}
 
-	lifeCycleRes, err := client.GetBucketLifecycle(blc.blOption.bucketName)
-	if err != nil {
-		return err
-	}
-
-	output, err := xml.MarshalIndent(lifeCycleRes, "  ", "    ")
+	output, err := client.GetBucketLifecycleXml(blc.blOption.bucketName)
 	if err != nil {
 		return err
 	}
@@ -307,8 +305,7 @@ func (blc *BucketLifeCycleCommand) GetBucketLifecycle() error {
 		outFile = os.Stdout
 	}
 
-	outFile.Write([]byte(xml.Header))
-	outFile.Write(output)
+	outFile.Write([]byte(output))
 
 	fmt.Printf("\n\n")
 

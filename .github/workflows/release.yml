@@ -1,0 +1,154 @@
+on:
+  push:
+    tags:
+      - 'v*'
+name: Create Release
+
+jobs:
+  create_release:
+    name: Create new release
+    runs-on: ubuntu-latest
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # This token is provided by Actions, you do not need to create your own token
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+          ref: ${{ github.ref }}
+      - name: Create Release
+        run: |
+          bash tools/create_release.sh ${{ github.ref_name }}
+  build_for_macosx:
+    needs: [create_release]
+    name: Build for MacOSX
+    runs-on: macos-13
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # This token is provided by Actions, you do not need to create your own token
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+          ref: ${{github.ref}}
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.20'
+      - name: Set up developer id application cert
+        uses: apple-actions/import-codesign-certs@v2
+        with:
+          p12-file-base64: ${{ secrets.APPLE_DEVELPER_ID_APPLICATION_CERT_DATA }}
+          p12-password: ${{ secrets.APPLE_DEVELPER_ID_APPLICATION_CERT_PASSWORD }}
+          keychain-password: tmppassworkd
+      - name: Set up develper id installer cert
+        uses: apple-actions/import-codesign-certs@v2
+        with:
+          p12-file-base64: ${{ secrets.APPLE_CERT_DATA }}
+          p12-password: ${{ secrets.APPLE_CERT_PASSWORD }}
+          create-keychain: false
+          keychain-password: tmppassworkd
+      - name: Build
+        run: |
+          TAG=${{ github.ref_name }}
+          VERSION=${TAG#v}
+          CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -ldflags "-X 'github.com/aliyun/aliyun-cli/cli.Version=${VERSION}'" -o out/aliyun main/main.go
+          codesign --sign "${{ secrets.APPLE_TEAM_ID }}" \
+            --entitlements tools/osx-entitlements.plist \
+            --options runtime \
+            --timestamp out/aliyun
+          tar zcvf out/aliyun-cli-macosx-${VERSION}-amd64.tgz -C out aliyun
+          bash tools/upload_asset.sh ${VERSION} out/aliyun-cli-macosx-${VERSION}-amd64.tgz
+          cp out/aliyun out/aliyun.amd64
+          CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -ldflags "-X 'github.com/aliyun/aliyun-cli/cli.Version=${VERSION}'" -o out/aliyun main/main.go
+          codesign --sign "${{ secrets.APPLE_TEAM_ID }}" \
+            --entitlements tools/osx-entitlements.plist \
+            --options runtime \
+            --timestamp out/aliyun
+          tar zcvf out/aliyun-cli-macosx-${VERSION}-arm64.tgz -C out aliyun
+          bash tools/upload_asset.sh ${VERSION} out/aliyun-cli-macosx-${VERSION}-arm64.tgz
+          cp out/aliyun out/aliyun.arm64
+          lipo -output out/aliyun -create out/aliyun.amd64 out/aliyun.arm64
+          tar zcvf out/aliyun-cli-macosx-${VERSION}-universal.tgz -C out aliyun
+          bash tools/upload_asset.sh ${VERSION} out/aliyun-cli-macosx-${VERSION}-universal.tgz
+          # generate out/aliyun-cli-${VERSION}.pkg
+          bash tools/build_pkg.sh ${VERSION}
+          productsign --sign "${{ secrets.APPLE_TEAM_ID }}" out/aliyun-cli-${VERSION}.pkg out/aliyun-cli-${VERSION}.pkg.signed
+          mv out/aliyun-cli-${VERSION}.pkg.signed out/aliyun-cli-${VERSION}.pkg
+          xcrun notarytool submit out/aliyun-cli-${VERSION}.pkg \
+            --team-id "${{ secrets.APPLE_TEAM_ID }}" \
+            --apple-id "${{ secrets.APPLE_ID }}" \
+            --password "${{ secrets.APPLE_APP_PASSWORD }}" \
+            --wait
+          xcrun stapler staple out/aliyun-cli-${VERSION}.pkg
+          bash tools/upload_asset.sh ${VERSION} out/aliyun-cli-${VERSION}.pkg
+  build_for_linux:
+    needs: [create_release]
+    name: Build for Linux
+    runs-on: ubuntu-latest
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # This token is provided by Actions, you do not need to create your own token
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+          ref: ${{github.ref}}
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.20'
+      - name: Build
+        run: |
+          TAG=${{ github.ref_name }}
+          VERSION=${TAG#v}
+          # build for Linux amd64
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-X 'github.com/aliyun/aliyun-cli/cli.Version=${VERSION}'" -o out/aliyun main/main.go
+          tar zcvf out/aliyun-cli-linux-${VERSION}-amd64.tgz -C out aliyun
+          bash tools/upload_asset.sh ${VERSION} out/aliyun-cli-linux-${VERSION}-amd64.tgz
+          # build for Linux arm64
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags "-X 'github.com/aliyun/aliyun-cli/cli.Version=${VERSION}'" -o out/aliyun main/main.go
+          tar zcvf out/aliyun-cli-linux-${VERSION}-arm64.tgz -C out aliyun
+          bash tools/upload_asset.sh ${VERSION} out/aliyun-cli-linux-${VERSION}-arm64.tgz
+  build_for_windows:
+    needs: [create_release]
+    name: Build for Windows
+    runs-on: windows-latest
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+          ref: ${{github.ref}}
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.20'
+      - name: Build
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $version = $tag -replace 'v', ''
+          $env:GOOS = "windows"
+          $env:GOARCH = "amd64"
+          $env:CGO_ENABLED = "0"
+          go build -ldflags "-X 'github.com/aliyun/aliyun-cli/cli.Version=${version}'" -o ./out/aliyun.exe main/main.go
+          Compress-Archive -Path ./out/aliyun.exe -DestinationPath ./out/aliyun-cli-windows-${version}-amd64.zip
+          bash ./tools/upload_asset.sh ${version} ./out/aliyun-cli-windows-${version}-amd64.zip
+  finish_release:
+    needs: [build_for_macosx, build_for_linux, build_for_windows]
+    name: Finish the release
+    runs-on: ubuntu-latest
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      ACCESS_KEY_ID: ${{ secrets.OSS_ACCESS_KEY_ID }}
+      ACCESS_KEY_SECRET: ${{ secrets.OSS_ACCESS_KEY_SECRET }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+          ref: ${{github.ref}}
+      - name: Download assets and compute shasum
+        run: |
+          TAG=${{ github.ref_name }}
+          VERSION=${TAG#v}
+          bash tools/download_assets.sh ${VERSION}
+          bash tools/upload_asset.sh ${VERSION} SHASUMS256.txt
+          bash tools/finish_release.sh ${VERSION}
